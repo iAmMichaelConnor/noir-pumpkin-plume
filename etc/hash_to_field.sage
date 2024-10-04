@@ -1,7 +1,20 @@
 from hashlib import sha256
-load('constants.sage')
-load('utils.sage')
+load('constants.sage') # GRUMPKIN_PRIME_q
+load('utils.sage') # bytes_to_num, num_to_bytes
+load('poseidon2.sage') # bytes_to_num, num_to_bytes
 
+
+def HashToField_Secp256k1(msg):
+    return HashToField(msg)
+
+def HashToField_Bls12_381(msg):
+    return HashToField(msg)
+
+# Pass a list of fields to this one; not bytes!
+def HashToField_Grumpkin(msg):
+    u0 = poseidon2_hash([*msg, 1])
+    u1 = poseidon2_hash([*msg, 2])
+    return (u0, u1)
 
 def HashToField(msg):
     ui = ExpandMessageXmd(msg)
@@ -12,7 +25,7 @@ def HashToField(msg):
 def BytesToRegisters(ui):
     ui.reverse()
     a = bytes_to_num(ui)
-    return num_to_bytes(a % SECP256K1_PRIME)
+    return num_to_bytes(a % GRUMPKIN_PRIME_q)
 
 
 # ExpandMessageXmd

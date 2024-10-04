@@ -1,7 +1,9 @@
 import sys
 import subprocess
-import toml
+# import toml
 load('gen.sage')
+
+# DO NOT RUN THIS BECAUSE IT MUTATES YOUR CODE
 
 # Run a shell command and print the output
 def run_command(command):
@@ -21,14 +23,14 @@ def format_double_array(pk):
     return "[" + ", ".join(format_array(subarr) for subarr in pk) + "]"
 
 def update_prover_toml(filepath, version1: bool, msg_len: int):
-    data = toml.load(filepath)
-    (msg, c, s, pk, nullifier) = plume_generate_test_case(version1, msg_len)
+#    data = toml.load(filepath)
+    (msg, c, s, pk, nullifier) = plume_generate_test_case_grumpkin(version1, msg_len)
     
-    data['c'] = c
-    data['msg'] = msg
-    data['nullifier'] = nullifier
-    data['pk'] = pk
-    data['s'] = s
+#    data['c'] = c
+#    data['msg'] = msg
+#    data['nullifier'] = nullifier
+#    data['pk'] = pk
+#    data['s'] = s
     
     c_str = format_array(c)
     msg_str = format_array(msg)
@@ -36,12 +38,18 @@ def update_prover_toml(filepath, version1: bool, msg_len: int):
     pk_str = format_double_array(pk)
     s_str = format_array(s)
     
-    with open(filepath, 'w') as f:
-        f.write(f'c = {c_str}\n')
-        f.write(f'msg = {msg_str}\n')
-        f.write(f'nullifier = {nullifier_str}\n')
-        f.write(f'pk = {pk_str}\n')
-        f.write(f's = {s_str}\n')
+    print("\nc", c_str)
+    print("msg", msg_str)
+    print("nullifier", nullifier_str)
+    print("pk", pk_str)
+    print("s", s_str)
+
+#    with open(filepath, 'w') as f:
+#        f.write(f'c = {c_str}\n')
+#        f.write(f'msg = {msg_str}\n')
+#        f.write(f'nullifier = {nullifier_str}\n')
+#        f.write(f'pk = {pk_str}\n')
+#        f.write(f's = {s_str}\n')
 
 def update_plume_version(is_v1: bool):
     path = "../crates/use/src/"
@@ -62,16 +70,16 @@ def update_plume_version(is_v1: bool):
         file.writelines(lines)
 
 
-def update_MSG_LEN_variable(msg_len: int):
-    path = "../crates/plume/src/"
-    with open(path + 'constants.nr', 'r') as file:
-        lines = file.readlines()
-    
-    MSG_LEN_line = 2
-    lines[MSG_LEN_line] = f"global MSG_LEN = {msg_len};\n"
-
-    with open(path + 'constants.nr', 'w') as file:
-        file.writelines(lines)
+#def update_MSG_LEN_variable(msg_len: int):
+#    path = "../crates/plume/src/"
+#    with open(path + 'constants.nr', 'r') as file:
+#        lines = file.readlines()
+#    
+#    MSG_LEN_line = 2
+#    lines[MSG_LEN_line] = f"global MSG_LEN = {msg_len};\n"
+#
+#    with open(path + 'constants.nr', 'w') as file:
+#        file.writelines(lines)
 
 
 # Take MSG_LEN number and plume version (v1 or v2)
@@ -88,8 +96,14 @@ if __name__ == "__main__":
         sys.exit()
 
     is_v1 = sys.argv[1] == versions[0]
+    print("Hello Mike!")
     msg_len = int(sys.argv[2])
 
-    update_plume_version(is_v1)
-    update_MSG_LEN_variable(msg_len)
-    update_prover_toml(prover_toml_path, is_v1, msg_len)
+    (msg, c, s, pk, nullifier) = plume_generate_test_case_grumpkin(is_v1, msg_len)
+
+#    update_plume_version(is_v1)
+#    update_MSG_LEN_variable(msg_len)
+    #update_prover_toml(prover_toml_path, is_v1, msg_len)
+
+
+

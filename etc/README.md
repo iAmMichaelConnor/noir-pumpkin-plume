@@ -29,6 +29,13 @@ Install SageMath by following [these instructions](https://doc.sagemath.org/html
 
 Select the version of plume you want to run: either "v1" or "v2", then the number of bytes for msg (non-negative number) and run `main.sage` supplying these as CLI arguments, for example:
 
+```
+python3 -m venv ./venv
+source venv/bin/activate
+python3 -m pip install xyz
+deactivate
+ ```
+
 ```bash
 sage main.sage v2 5
 ```

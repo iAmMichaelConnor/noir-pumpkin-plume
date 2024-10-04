@@ -1,10 +1,12 @@
 [package]
 name = "use"
 type = "bin"
-authors = ["Distributed Lab"]
+authors = ["Distributed Lab", "Aztec"]
 license = "MIT"
 description = "PLUME usage in Noir."
-compiler_version = ">=0.32.0"
+compiler_version = ">=0.35.0"
 
 [dependencies]
 plume = { path = "../plume" }
+bignum = {tag = "v0.3.5", git = "https://github.com/noir-lang/noir-bignum"}
+# bignum = {path = "../../../noir-bignum"}

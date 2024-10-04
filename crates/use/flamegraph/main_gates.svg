@@ -1,0 +1,491 @@
+<?xml version="1.0" standalone="no"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg version="1.1" width="1200" height="358" onload="init(evt)" viewBox="0 0 1200 358" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:fg="http://github.com/jonhoo/inferno"><!--Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples.--><!--NOTES: --><defs><linearGradient id="background" y1="0" y2="1" x1="0" x2="0"><stop stop-color="#eeeeee" offset="5%"/><stop stop-color="#eeeeb0" offset="95%"/></linearGradient></defs><style type="text/css">
+text { font-family:monospace; font-size:12px }
+#title { text-anchor:middle; font-size:17px; }
+#matched { text-anchor:end; }
+#search { text-anchor:end; opacity:0.1; cursor:pointer; }
+#search:hover, #search.show { opacity:1; }
+#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+#unzoom { cursor:pointer; }
+#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+.hide { display:none; }
+.parent { opacity:0.5; }
+</style><script type="text/ecmascript"><![CDATA[
+        var nametype = 'Function:';
+        var fontsize = 12;
+        var fontwidth = 0.59;
+        var xpad = 10;
+        var inverted = false;
+        var searchcolor = 'rgb(230,0,230)';
+        var fluiddrawing = true;
+        var truncate_text_right = true;
+    ]]><![CDATA["use strict";
+var details, searchbtn, unzoombtn, matchedtxt, svg, searching, frames, known_font_width;
+function init(evt) {
+    details = document.getElementById("details").firstChild;
+    searchbtn = document.getElementById("search");
+    unzoombtn = document.getElementById("unzoom");
+    matchedtxt = document.getElementById("matched");
+    svg = document.getElementsByTagName("svg")[0];
+    frames = document.getElementById("frames");
+    known_font_width = get_monospace_width(frames);
+    total_samples = parseInt(frames.attributes.total_samples.value);
+    searching = 0;
+
+    // Use GET parameters to restore a flamegraph's state.
+    var restore_state = function() {
+        var params = get_params();
+        if (params.x && params.y)
+            zoom(find_group(document.querySelector('[*|x="' + params.x + '"][y="' + params.y + '"]')));
+        if (params.s)
+            search(params.s);
+    };
+
+    if (fluiddrawing) {
+        // Make width dynamic so the SVG fits its parent's width.
+        svg.removeAttribute("width");
+        // Edge requires us to have a viewBox that gets updated with size changes.
+        var isEdge = /Edge\/\d./i.test(navigator.userAgent);
+        if (!isEdge) {
+            svg.removeAttribute("viewBox");
+        }
+        var update_for_width_change = function() {
+            if (isEdge) {
+                svg.attributes.viewBox.value = "0 0 " + svg.width.baseVal.value + " " + svg.height.baseVal.value;
+            }
+
+            // Keep consistent padding on left and right of frames container.
+            frames.attributes.width.value = svg.width.baseVal.value - xpad * 2;
+
+            // Text truncation needs to be adjusted for the current width.
+            update_text_for_elements(frames.children);
+
+            // Keep search elements at a fixed distance from right edge.
+            var svgWidth = svg.width.baseVal.value;
+            searchbtn.attributes.x.value = svgWidth - xpad;
+            matchedtxt.attributes.x.value = svgWidth - xpad;
+        };
+        window.addEventListener('resize', function() {
+            update_for_width_change();
+        });
+        // This needs to be done asynchronously for Safari to work.
+        setTimeout(function() {
+            unzoom();
+            update_for_width_change();
+            restore_state();
+        }, 0);
+    } else {
+        restore_state();
+    }
+}
+// event listeners
+window.addEventListener("click", function(e) {
+    var target = find_group(e.target);
+    if (target) {
+        if (target.nodeName == "a") {
+            if (e.ctrlKey === false) return;
+            e.preventDefault();
+        }
+        if (target.classList.contains("parent")) unzoom();
+        zoom(target);
+
+        // set parameters for zoom state
+        var el = target.querySelector("rect");
+        if (el && el.attributes && el.attributes.y && el.attributes["fg:x"]) {
+            var params = get_params()
+            params.x = el.attributes["fg:x"].value;
+            params.y = el.attributes.y.value;
+            history.replaceState(null, null, parse_params(params));
+        }
+    }
+    else if (e.target.id == "unzoom") {
+        unzoom();
+
+        // remove zoom state
+        var params = get_params();
+        if (params.x) delete params.x;
+        if (params.y) delete params.y;
+        history.replaceState(null, null, parse_params(params));
+    }
+    else if (e.target.id == "search") search_prompt();
+}, false)
+// mouse-over for info
+// show
+window.addEventListener("mouseover", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = nametype + " " + g_to_text(target);
+}, false)
+// clear
+window.addEventListener("mouseout", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = ' ';
+}, false)
+// ctrl-F for search
+window.addEventListener("keydown",function (e) {
+    if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+        e.preventDefault();
+        search_prompt();
+    }
+}, false)
+// functions
+function get_params() {
+    var params = {};
+    var paramsarr = window.location.search.substr(1).split('&');
+    for (var i = 0; i < paramsarr.length; ++i) {
+        var tmp = paramsarr[i].split("=");
+        if (!tmp[0] || !tmp[1]) continue;
+        params[tmp[0]]  = decodeURIComponent(tmp[1]);
+    }
+    return params;
+}
+function parse_params(params) {
+    var uri = "?";
+    for (var key in params) {
+        uri += key + '=' + encodeURIComponent(params[key]) + '&';
+    }
+    if (uri.slice(-1) == "&")
+        uri = uri.substring(0, uri.length - 1);
+    if (uri == '?')
+        uri = window.location.href.split('?')[0];
+    return uri;
+}
+function find_child(node, selector) {
+    var children = node.querySelectorAll(selector);
+    if (children.length) return children[0];
+    return;
+}
+function find_group(node) {
+    var parent = node.parentElement;
+    if (!parent) return;
+    if (parent.id == "frames") return node;
+    return find_group(parent);
+}
+function orig_save(e, attr, val) {
+    if (e.attributes["fg:orig_" + attr] != undefined) return;
+    if (e.attributes[attr] == undefined) return;
+    if (val == undefined) val = e.attributes[attr].value;
+    e.setAttribute("fg:orig_" + attr, val);
+}
+function orig_load(e, attr) {
+    if (e.attributes["fg:orig_"+attr] == undefined) return;
+    e.attributes[attr].value = e.attributes["fg:orig_" + attr].value;
+    e.removeAttribute("fg:orig_" + attr);
+}
+function g_to_text(e) {
+    var text = find_child(e, "title").firstChild.nodeValue;
+    return (text)
+}
+function g_to_func(e) {
+    var func = g_to_text(e);
+    // if there's any manipulation we want to do to the function
+    // name before it's searched, do it here before returning.
+    return (func);
+}
+function get_monospace_width(frames) {
+    // Given the id="frames" element, return the width of text characters if
+    // this is a monospace font, otherwise return 0.
+    text = find_child(frames.children[0], "text");
+    originalContent = text.textContent;
+    text.textContent = "!";
+    bangWidth = text.getComputedTextLength();
+    text.textContent = "W";
+    wWidth = text.getComputedTextLength();
+    text.textContent = originalContent;
+    if (bangWidth === wWidth) {
+        return bangWidth;
+    } else {
+        return 0;
+    }
+}
+function update_text_for_elements(elements) {
+    // In order to render quickly in the browser, you want to do one pass of
+    // reading attributes, and one pass of mutating attributes. See
+    // https://web.dev/avoid-large-complex-layouts-and-layout-thrashing/ for details.
+
+    // Fall back to inefficient calculation, if we're variable-width font.
+    // TODO This should be optimized somehow too.
+    if (known_font_width === 0) {
+        for (var i = 0; i < elements.length; i++) {
+            update_text(elements[i]);
+        }
+        return;
+    }
+
+    var textElemNewAttributes = [];
+    for (var i = 0; i < elements.length; i++) {
+        var e = elements[i];
+        var r = find_child(e, "rect");
+        var t = find_child(e, "text");
+        var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+        var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+        var newX = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+
+        // Smaller than this size won't fit anything
+        if (w < 2 * known_font_width) {
+            textElemNewAttributes.push([newX, ""]);
+            continue;
+        }
+
+        // Fit in full text width
+        if (txt.length * known_font_width < w) {
+            textElemNewAttributes.push([newX, txt]);
+            continue;
+        }
+
+        var substringLength = Math.floor(w / known_font_width) - 2;
+        if (truncate_text_right) {
+            // Truncate the right side of the text.
+            textElemNewAttributes.push([newX, txt.substring(0, substringLength) + ".."]);
+            continue;
+        } else {
+            // Truncate the left side of the text.
+            textElemNewAttributes.push([newX, ".." + txt.substring(txt.length - substringLength, txt.length)]);
+            continue;
+        }
+    }
+
+    console.assert(textElemNewAttributes.length === elements.length, "Resize failed, please file a bug at https://github.com/jonhoo/inferno/");
+
+    // Now that we know new textContent, set it all in one go so we don't refresh a bazillion times.
+    for (var i = 0; i < elements.length; i++) {
+        var e = elements[i];
+        var values = textElemNewAttributes[i];
+        var t = find_child(e, "text");
+        t.attributes.x.value = values[0];
+        t.textContent = values[1];
+    }
+}
+
+function update_text(e) {
+    var r = find_child(e, "rect");
+    var t = find_child(e, "text");
+    var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+    var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+    t.attributes.x.value = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+
+    // Smaller than this size won't fit anything
+    if (w < 2 * fontsize * fontwidth) {
+        t.textContent = "";
+        return;
+    }
+    t.textContent = txt;
+    // Fit in full text width
+    if (t.getComputedTextLength() < w)
+        return;
+    if (truncate_text_right) {
+        // Truncate the right side of the text.
+        for (var x = txt.length - 2; x > 0; x--) {
+            if (t.getSubStringLength(0, x + 2) <= w) {
+                t.textContent = txt.substring(0, x) + "..";
+                return;
+            }
+        }
+    } else {
+        // Truncate the left side of the text.
+        for (var x = 2; x < txt.length; x++) {
+            if (t.getSubStringLength(x - 2, txt.length) <= w) {
+                t.textContent = ".." + txt.substring(x, txt.length);
+                return;
+            }
+        }
+    }
+    t.textContent = "";
+}
+// zoom
+function zoom_reset(e) {
+    if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * parseInt(e.attributes["fg:x"].value) / total_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / total_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_reset(c[i]);
+    }
+}
+function zoom_child(e, x, zoomed_width_samples) {
+    if (e.tagName == "text") {
+        var parent_x = parseFloat(find_child(e.parentNode, "rect[x]").attributes.x.value);
+        e.attributes.x.value = format_percent(parent_x + (100 * 3 / frames.attributes.width.value));
+    } else if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * (parseInt(e.attributes["fg:x"].value) - x) / zoomed_width_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / zoomed_width_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_child(c[i], x, zoomed_width_samples);
+    }
+}
+function zoom_parent(e) {
+    if (e.attributes) {
+        if (e.attributes.x != undefined) {
+            e.attributes.x.value = "0.0%";
+        }
+        if (e.attributes.width != undefined) {
+            e.attributes.width.value = "100.0%";
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_parent(c[i]);
+    }
+}
+function zoom(node) {
+    var attr = find_child(node, "rect").attributes;
+    var width = parseInt(attr["fg:w"].value);
+    var xmin = parseInt(attr["fg:x"].value);
+    var xmax = xmin + width;
+    var ymin = parseFloat(attr.y.value);
+    unzoombtn.classList.remove("hide");
+    var el = frames.children;
+    var to_update_text = [];
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var a = find_child(e, "rect").attributes;
+        var ex = parseInt(a["fg:x"].value);
+        var ew = parseInt(a["fg:w"].value);
+        // Is it an ancestor
+        if (!inverted) {
+            var upstack = parseFloat(a.y.value) > ymin;
+        } else {
+            var upstack = parseFloat(a.y.value) < ymin;
+        }
+        if (upstack) {
+            // Direct ancestor
+            if (ex <= xmin && (ex+ew) >= xmax) {
+                e.classList.add("parent");
+                zoom_parent(e);
+                to_update_text.push(e);
+            }
+            // not in current path
+            else
+                e.classList.add("hide");
+        }
+        // Children maybe
+        else {
+            // no common path
+            if (ex < xmin || ex >= xmax) {
+                e.classList.add("hide");
+            }
+            else {
+                zoom_child(e, xmin, width);
+                to_update_text.push(e);
+            }
+        }
+    }
+    update_text_for_elements(to_update_text);
+}
+function unzoom() {
+    unzoombtn.classList.add("hide");
+    var el = frames.children;
+    for(var i = 0; i < el.length; i++) {
+        el[i].classList.remove("parent");
+        el[i].classList.remove("hide");
+        zoom_reset(el[i]);
+    }
+    update_text_for_elements(el);
+}
+// search
+function reset_search() {
+    var el = document.querySelectorAll("#frames rect");
+    for (var i = 0; i < el.length; i++) {
+        orig_load(el[i], "fill")
+    }
+    var params = get_params();
+    delete params.s;
+    history.replaceState(null, null, parse_params(params));
+}
+function search_prompt() {
+    if (!searching) {
+        var term = prompt("Enter a search term (regexp " +
+            "allowed, eg: ^ext4_)", "");
+        if (term != null) {
+            search(term)
+        }
+    } else {
+        reset_search();
+        searching = 0;
+        searchbtn.classList.remove("show");
+        searchbtn.firstChild.nodeValue = "Search"
+        matchedtxt.classList.add("hide");
+        matchedtxt.firstChild.nodeValue = ""
+    }
+}
+function search(term) {
+    var re = new RegExp(term);
+    var el = frames.children;
+    var matches = new Object();
+    var maxwidth = 0;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        // Skip over frames which are either not visible, or below the zoomed-to frame
+        if (e.classList.contains("hide") || e.classList.contains("parent")) {
+            continue;
+        }
+        var func = g_to_func(e);
+        var rect = find_child(e, "rect");
+        if (func == null || rect == null)
+            continue;
+        // Save max width. Only works as we have a root frame
+        var w = parseInt(rect.attributes["fg:w"].value);
+        if (w > maxwidth)
+            maxwidth = w;
+        if (func.match(re)) {
+            // highlight
+            var x = parseInt(rect.attributes["fg:x"].value);
+            orig_save(rect, "fill");
+            rect.attributes.fill.value = searchcolor;
+            // remember matches
+            if (matches[x] == undefined) {
+                matches[x] = w;
+            } else {
+                if (w > matches[x]) {
+                    // overwrite with parent
+                    matches[x] = w;
+                }
+            }
+            searching = 1;
+        }
+    }
+    if (!searching)
+        return;
+    var params = get_params();
+    params.s = term;
+    history.replaceState(null, null, parse_params(params));
+
+    searchbtn.classList.add("show");
+    searchbtn.firstChild.nodeValue = "Reset Search";
+    // calculate percent matched, excluding vertical overlap
+    var count = 0;
+    var lastx = -1;
+    var lastw = 0;
+    var keys = Array();
+    for (k in matches) {
+        if (matches.hasOwnProperty(k))
+            keys.push(k);
+    }
+    // sort the matched frames by their x location
+    // ascending, then width descending
+    keys.sort(function(a, b){
+        return a - b;
+    });
+    // Step through frames saving only the biggest bottom-up frames
+    // thanks to the sort order. This relies on the tree property
+    // where children are always smaller than their parents.
+    for (var k in keys) {
+        var x = parseInt(keys[k]);
+        var w = matches[keys[k]];
+        if (x >= lastx + lastw) {
+            count += w;
+            lastx = x;
+            lastw = w;
+        }
+    }
+    // display matched percent
+    matchedtxt.classList.remove("hide");
+    var pct = 100 * count / maxwidth;
+    if (pct != 100) pct = pct.toFixed(1);
+    matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+}
+function format_percent(n) {
+    return n.toFixed(4) + "%";
+}
+]]></script><rect x="0" y="0" width="100%" height="358" fill="url(#background)"/><text id="title" fill="rgb(0,0,0)" x="50.0000%" y="24.00">../../target/use.json-main</text><text id="details" fill="rgb(0,0,0)" x="10" y="341.00"> </text><text id="unzoom" class="hide" fill="rgb(0,0,0)" x="10" y="24.00">Reset Zoom</text><text id="search" fill="rgb(0,0,0)" x="1190" y="24.00">Search</text><text id="matched" fill="rgb(0,0,0)" x="1190" y="341.00"> </text><svg id="frames" x="10" width="1180" total_samples="32373"><g><title>bn254.nr:87:9::xlo.assert_max_bit_size(128) (2,797 gates, 8.64%)</title><rect x="0.0000%" y="205" width="8.6399%" height="23" fill="rgb(255,205,205)" fg:x="0" fg:w="2797"/><text x="0.2500%" y="219.50">bn254.nr:87:..</text></g><g><title>mod.nr:27:9::self.__assert_max_bit_size(bit_size) (2,797 gates, 8.64%)</title><rect x="0.0000%" y="181" width="8.6399%" height="23" fill="rgb(255,205,205)" fg:x="0" fg:w="2797"/><text x="0.2500%" y="195.50">mod.nr:27:9:..</text></g><g><title>opcode::blackbox::range (2,797 gates, 8.64%)</title><rect x="0.0000%" y="157" width="8.6399%" height="23" fill="rgb(255,205,205)" fg:x="0" fg:w="2797"/><text x="0.2500%" y="171.50">opcode::blac..</text></g><g><title>bn254.nr:88:9::xhi.assert_max_bit_size(128) (79 gates, 0.24%)</title><rect x="8.6399%" y="205" width="0.2440%" height="23" fill="rgb(255,242,242)" fg:x="2797" fg:w="79"/><text x="8.8899%" y="219.50"></text></g><g><title>mod.nr:27:9::self.__assert_max_bit_size(bit_size) (79 gates, 0.24%)</title><rect x="8.6399%" y="181" width="0.2440%" height="23" fill="rgb(255,242,242)" fg:x="2797" fg:w="79"/><text x="8.8899%" y="195.50"></text></g><g><title>opcode::blackbox::range (79 gates, 0.24%)</title><rect x="8.6399%" y="157" width="0.2440%" height="23" fill="rgb(255,242,242)" fg:x="2797" fg:w="79"/><text x="8.8899%" y="171.50"></text></g><g><title>bn254.nr:91:9::assert_eq(x, xlo + TWO_POW_128 * xhi) (10 gates, 0.03%)</title><rect x="8.8839%" y="205" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="2876" fg:w="10"/><text x="9.1339%" y="219.50"></text></g><g><title>opcode::arithmetic (10 gates, 0.03%)</title><rect x="8.8839%" y="181" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="2876" fg:w="10"/><text x="9.1339%" y="195.50"></text></g><g><title>bn254.nr:69:18::lte_16_hint(alo, blo) (10 gates, 0.03%)</title><rect x="8.9148%" y="181" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="2886" fg:w="10"/><text x="9.1648%" y="195.50"></text></g><g><title>opcode::blackbox::range (10 gates, 0.03%)</title><rect x="8.9148%" y="157" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="2886" fg:w="10"/><text x="9.1648%" y="171.50"></text></g><g><title>opcode::arithmetic (10 gates, 0.03%)</title><rect x="8.9457%" y="133" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="2896" fg:w="10"/><text x="9.1957%" y="147.50"></text></g><g><title>bn254.nr:74:5::rlo.assert_max_bit_size(128) (70 gates, 0.22%)</title><rect x="8.9457%" y="181" width="0.2162%" height="23" fill="rgb(255,243,243)" fg:x="2896" fg:w="70"/><text x="9.1957%" y="195.50"></text></g><g><title>mod.nr:27:9::self.__assert_max_bit_size(bit_size) (70 gates, 0.22%)</title><rect x="8.9457%" y="157" width="0.2162%" height="23" fill="rgb(255,243,243)" fg:x="2896" fg:w="70"/><text x="9.1957%" y="171.50"></text></g><g><title>opcode::blackbox::range (60 gates, 0.19%)</title><rect x="8.9766%" y="133" width="0.1853%" height="23" fill="rgb(255,243,243)" fg:x="2906" fg:w="60"/><text x="9.2266%" y="147.50"></text></g><g><title>opcode::arithmetic (10 gates, 0.03%)</title><rect x="9.1620%" y="133" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="2966" fg:w="10"/><text x="9.4120%" y="147.50"></text></g><g><title>lib.nr:101:21::Scalar::from_field(c_f) (3,036 gates, 9.38%)</title><rect x="0.0000%" y="253" width="9.3782%" height="23" fill="rgb(255,204,204)" fg:x="0" fg:w="3036"/><text x="0.2500%" y="267.50">lib.nr:101:21..</text></g><g><title>embedded_curve_ops.nr:74:21::crate::field::bn254::decompose(scalar) (3,036 gates, 9.38%)</title><rect x="0.0000%" y="229" width="9.3782%" height="23" fill="rgb(255,204,204)" fg:x="0" fg:w="3036"/><text x="0.2500%" y="243.50">embedded_curv..</text></g><g><title>bn254.nr:94:9::assert_gt_limbs((PLO, PHI), (xlo, xhi)) (150 gates, 0.46%)</title><rect x="8.9148%" y="205" width="0.4633%" height="23" fill="rgb(255,239,239)" fg:x="2886" fg:w="150"/><text x="9.1648%" y="219.50"></text></g><g><title>bn254.nr:75:5::rhi.assert_max_bit_size(128) (70 gates, 0.22%)</title><rect x="9.1620%" y="181" width="0.2162%" height="23" fill="rgb(255,243,243)" fg:x="2966" fg:w="70"/><text x="9.4120%" y="195.50"></text></g><g><title>mod.nr:27:9::self.__assert_max_bit_size(bit_size) (70 gates, 0.22%)</title><rect x="9.1620%" y="157" width="0.2162%" height="23" fill="rgb(255,243,243)" fg:x="2966" fg:w="70"/><text x="9.4120%" y="171.50"></text></g><g><title>opcode::blackbox::range (60 gates, 0.19%)</title><rect x="9.1928%" y="133" width="0.1853%" height="23" fill="rgb(255,243,243)" fg:x="2976" fg:w="60"/><text x="9.4428%" y="147.50"></text></g><g><title>embedded_curve_ops.nr:55:104::self.y == b.y (30 gates, 0.09%)</title><rect x="9.3782%" y="229" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="3036" fg:w="30"/><text x="9.6282%" y="243.50"></text></g><g><title>opcode::arithmetic (30 gates, 0.09%)</title><rect x="9.3782%" y="205" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="3036" fg:w="30"/><text x="9.6282%" y="219.50"></text></g><g><title>embedded_curve_ops.nr:55:47::(self.is_infinite == b.is_infinite) &amp; (self.x == b.x) &amp; (self.y == b.y) (10 gates, 0.03%)</title><rect x="9.4709%" y="229" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="3066" fg:w="10"/><text x="9.7209%" y="243.50"></text></g><g><title>opcode::arithmetic (10 gates, 0.03%)</title><rect x="9.4709%" y="205" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="3066" fg:w="10"/><text x="9.7209%" y="219.50"></text></g><g><title>embedded_curve_ops.nr:55:48::self.is_infinite == b.is_infinite (30 gates, 0.09%)</title><rect x="9.5017%" y="229" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="3076" fg:w="30"/><text x="9.7517%" y="243.50"></text></g><g><title>opcode::arithmetic (30 gates, 0.09%)</title><rect x="9.5017%" y="205" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="3076" fg:w="30"/><text x="9.7517%" y="219.50"></text></g><g><title>embedded_curve_ops.nr:55:86::self.x == b.x (30 gates, 0.09%)</title><rect x="9.5944%" y="229" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="3106" fg:w="30"/><text x="9.8444%" y="243.50"></text></g><g><title>opcode::arithmetic (30 gates, 0.09%)</title><rect x="9.5944%" y="205" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="3106" fg:w="30"/><text x="9.8444%" y="219.50"></text></g><g><title>embedded_curve_ops.nr:55:9::(self.is_infinite &amp; b.is_infinite) | ((self.is_infinite == b.is_infinite) &amp; (self.x == b.x) &amp; (self.y == b.y)) (20 gates, 0.06%)</title><rect x="9.6871%" y="229" width="0.0618%" height="23" fill="rgb(255,246,246)" fg:x="3136" fg:w="20"/><text x="9.9371%" y="243.50"></text></g><g><title>opcode::arithmetic (20 gates, 0.06%)</title><rect x="9.6871%" y="205" width="0.0618%" height="23" fill="rgb(255,246,246)" fg:x="3136" fg:w="20"/><text x="9.9371%" y="219.50"></text></g><g><title>lib.nr:109:12::A2 + B2 == msm(&amp;[s, c, s, c], &amp;[G, neg_A, H, neg_B]) (130 gates, 0.40%)</title><rect x="9.3782%" y="253" width="0.4016%" height="23" fill="rgb(255,240,240)" fg:x="3036" fg:w="130"/><text x="9.6282%" y="267.50"></text></g><g><title>opcode::arithmetic (10 gates, 0.03%)</title><rect x="9.7489%" y="229" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="3156" fg:w="10"/><text x="9.9989%" y="243.50"></text></g><g><title>embedded_curve_ops.nr:125:23::embedded_curve_add_array_return(point1, point2) (410 gates, 1.27%)</title><rect x="9.7798%" y="205" width="1.2665%" height="23" fill="rgb(255,233,233)" fg:x="3166" fg:w="410"/><text x="10.0298%" y="219.50"></text></g><g><title>opcode::blackbox::embedded_curve_add (410 gates, 1.27%)</title><rect x="9.7798%" y="181" width="1.2665%" height="23" fill="rgb(255,233,233)" fg:x="3166" fg:w="410"/><text x="10.0298%" y="195.50"></text></g><g><title>lib.nr:109:12::A2 + B2 (440 gates, 1.36%)</title><rect x="9.7798%" y="253" width="1.3592%" height="23" fill="rgb(255,232,232)" fg:x="3166" fg:w="440"/><text x="10.0298%" y="267.50"></text></g><g><title>embedded_curve_ops.nr:29:9::embedded_curve_add(self, other) (440 gates, 1.36%)</title><rect x="9.7798%" y="229" width="1.3592%" height="23" fill="rgb(255,232,232)" fg:x="3166" fg:w="440"/><text x="10.0298%" y="243.50"></text></g><g><title>embedded_curve_ops.nr:128:45::point_array[2] == 1 (30 gates, 0.09%)</title><rect x="11.0462%" y="205" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="3576" fg:w="30"/><text x="11.2962%" y="219.50"></text></g><g><title>opcode::arithmetic (30 gates, 0.09%)</title><rect x="11.0462%" y="181" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="3576" fg:w="30"/><text x="11.2962%" y="195.50"></text></g><g><title>opcode::arithmetic (2 gates, 0.01%)</title><rect x="11.1389%" y="205" width="0.0062%" height="23" fill="rgb(255,248,248)" fg:x="3606" fg:w="2"/><text x="11.3889%" y="219.50"></text></g><g><title>lib.nr:31:23::multi_scalar_mul_slice(points, scalars) (21,752 gates, 67.19%)</title><rect x="11.1389%" y="229" width="67.1918%" height="23" fill="rgb(255,127,127)" fg:x="3606" fg:w="21752"/><text x="11.3889%" y="243.50">lib.nr:31:23::multi_scalar_mul_slice(points, scalars)</text></g><g><title>opcode::blackbox::multi_scalar_mul (21,750 gates, 67.19%)</title><rect x="11.1451%" y="205" width="67.1856%" height="23" fill="rgb(255,127,127)" fg:x="3608" fg:w="21750"/><text x="11.3951%" y="219.50">opcode::blackbox::multi_scalar_mul</text></g><g><title>lib.nr:33:23::__field_to_bool(point_array[2]) (10 gates, 0.03%)</title><rect x="78.3307%" y="229" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="25358" fg:w="10"/><text x="78.5807%" y="243.50"></text></g><g><title>opcode::blackbox::range (10 gates, 0.03%)</title><rect x="78.3307%" y="205" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="25358" fg:w="10"/><text x="78.5807%" y="219.50"></text></g><g><title>lib.nr:109:23::msm(&amp;[s, c, s, c], &amp;[G, neg_A, H, neg_B]) (21,772 gates, 67.25%)</title><rect x="11.1389%" y="253" width="67.2536%" height="23" fill="rgb(255,127,127)" fg:x="3606" fg:w="21772"/><text x="11.3889%" y="267.50">lib.nr:109:23::msm(&amp;[s, c, s, c], &amp;[G, neg_A, H, neg_B])</text></g><g><title>lib.nr:34:12::is_infinite as Field == point_array[2] (10 gates, 0.03%)</title><rect x="78.3616%" y="229" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="25368" fg:w="10"/><text x="78.6116%" y="243.50"></text></g><g><title>opcode::arithmetic (10 gates, 0.03%)</title><rect x="78.3616%" y="205" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="25368" fg:w="10"/><text x="78.6116%" y="219.50"></text></g><g><title>opcode::arithmetic (120 gates, 0.37%)</title><rect x="78.3925%" y="133" width="0.3707%" height="23" fill="rgb(255,240,240)" fg:x="25378" fg:w="120"/><text x="78.6425%" y="147.50"></text></g><g><title>embedded_curve_ops.nr:125:23::embedded_curve_add_array_return(point1, point2) (530 gates, 1.64%)</title><rect x="78.3925%" y="157" width="1.6372%" height="23" fill="rgb(255,230,230)" fg:x="25378" fg:w="530"/><text x="78.6425%" y="171.50"></text></g><g><title>opcode::blackbox::embedded_curve_add (410 gates, 1.27%)</title><rect x="78.7632%" y="133" width="1.2665%" height="23" fill="rgb(255,233,233)" fg:x="25498" fg:w="410"/><text x="79.0132%" y="147.50"></text></g><g><title>hash_to_curve.nr:11:5::Q0 + Q1 (560 gates, 1.73%)</title><rect x="78.3925%" y="205" width="1.7298%" height="23" fill="rgb(255,230,230)" fg:x="25378" fg:w="560"/><text x="78.6425%" y="219.50"></text></g><g><title>embedded_curve_ops.nr:29:9::embedded_curve_add(self, other) (560 gates, 1.73%)</title><rect x="78.3925%" y="181" width="1.7298%" height="23" fill="rgb(255,230,230)" fg:x="25378" fg:w="560"/><text x="78.6425%" y="195.50"></text></g><g><title>embedded_curve_ops.nr:128:45::point_array[2] == 1 (30 gates, 0.09%)</title><rect x="80.0297%" y="157" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="25908" fg:w="30"/><text x="80.2797%" y="171.50"></text></g><g><title>opcode::arithmetic (30 gates, 0.09%)</title><rect x="80.0297%" y="133" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="25908" fg:w="30"/><text x="80.2797%" y="147.50"></text></g><g><title>opcode::arithmetic (5 gates, 0.02%)</title><rect x="80.1223%" y="37" width="0.0154%" height="23" fill="rgb(255,248,248)" fg:x="25938" fg:w="5"/><text x="80.3723%" y="51.50"></text></g><g><title>hash_to_field.nr:4:17::poseidon2_hash(msg) (775 gates, 2.39%)</title><rect x="80.1223%" y="181" width="2.3940%" height="23" fill="rgb(255,226,226)" fg:x="25938" fg:w="775"/><text x="80.3723%" y="195.50">ha..</text></g><g><title>utils.nr:17:5::std::hash::poseidon2::Poseidon2::hash(inputs, N) (775 gates, 2.39%)</title><rect x="80.1223%" y="157" width="2.3940%" height="23" fill="rgb(255,226,226)" fg:x="25938" fg:w="775"/><text x="80.3723%" y="171.50">ut..</text></g><g><title>poseidon2.nr:17:13::Poseidon2::hash_internal(input, N, false) (775 gates, 2.39%)</title><rect x="80.1223%" y="133" width="2.3940%" height="23" fill="rgb(255,226,226)" fg:x="25938" fg:w="775"/><text x="80.3723%" y="147.50">po..</text></g><g><title>poseidon2.nr:114:9::sponge.squeeze() (775 gates, 2.39%)</title><rect x="80.1223%" y="109" width="2.3940%" height="23" fill="rgb(255,226,226)" fg:x="25938" fg:w="775"/><text x="80.3723%" y="123.50">po..</text></g><g><title>poseidon2.nr:79:39::self.perform_duplex() (775 gates, 2.39%)</title><rect x="80.1223%" y="85" width="2.3940%" height="23" fill="rgb(255,226,226)" fg:x="25938" fg:w="775"/><text x="80.3723%" y="99.50">po..</text></g><g><title>poseidon2.nr:40:22::crate::hash::poseidon2_permutation(self.state, 4) (775 gates, 2.39%)</title><rect x="80.1223%" y="61" width="2.3940%" height="23" fill="rgb(255,226,226)" fg:x="25938" fg:w="775"/><text x="80.3723%" y="75.50">po..</text></g><g><title>opcode::blackbox::poseidon2_permutation (770 gates, 2.38%)</title><rect x="80.1378%" y="37" width="2.3785%" height="23" fill="rgb(255,226,226)" fg:x="25943" fg:w="770"/><text x="80.3878%" y="51.50">op..</text></g><g><title>opcode::arithmetic (2 gates, 0.01%)</title><rect x="82.5163%" y="37" width="0.0062%" height="23" fill="rgb(255,248,248)" fg:x="26713" fg:w="2"/><text x="82.7663%" y="51.50"></text></g><g><title>hash_to_field.nr:5:15::poseidon2_hash([m, 0]) (772 gates, 2.38%)</title><rect x="82.5163%" y="181" width="2.3847%" height="23" fill="rgb(255,226,226)" fg:x="26713" fg:w="772"/><text x="82.7663%" y="195.50">ha..</text></g><g><title>utils.nr:17:5::std::hash::poseidon2::Poseidon2::hash(inputs, N) (772 gates, 2.38%)</title><rect x="82.5163%" y="157" width="2.3847%" height="23" fill="rgb(255,226,226)" fg:x="26713" fg:w="772"/><text x="82.7663%" y="171.50">ut..</text></g><g><title>poseidon2.nr:17:13::Poseidon2::hash_internal(input, N, false) (772 gates, 2.38%)</title><rect x="82.5163%" y="133" width="2.3847%" height="23" fill="rgb(255,226,226)" fg:x="26713" fg:w="772"/><text x="82.7663%" y="147.50">po..</text></g><g><title>poseidon2.nr:114:9::sponge.squeeze() (772 gates, 2.38%)</title><rect x="82.5163%" y="109" width="2.3847%" height="23" fill="rgb(255,226,226)" fg:x="26713" fg:w="772"/><text x="82.7663%" y="123.50">po..</text></g><g><title>poseidon2.nr:79:39::self.perform_duplex() (772 gates, 2.38%)</title><rect x="82.5163%" y="85" width="2.3847%" height="23" fill="rgb(255,226,226)" fg:x="26713" fg:w="772"/><text x="82.7663%" y="99.50">po..</text></g><g><title>poseidon2.nr:40:22::crate::hash::poseidon2_permutation(self.state, 4) (772 gates, 2.38%)</title><rect x="82.5163%" y="61" width="2.3847%" height="23" fill="rgb(255,226,226)" fg:x="26713" fg:w="772"/><text x="82.7663%" y="75.50">po..</text></g><g><title>opcode::blackbox::poseidon2_permutation (770 gates, 2.38%)</title><rect x="82.5225%" y="37" width="2.3785%" height="23" fill="rgb(255,226,226)" fg:x="26715" fg:w="770"/><text x="82.7725%" y="51.50">op..</text></g><g><title>opcode::arithmetic (1 gates, 0.00%)</title><rect x="84.9010%" y="37" width="0.0031%" height="23" fill="rgb(255,249,249)" fg:x="27485" fg:w="1"/><text x="85.1510%" y="51.50"></text></g><g><title>hash_to_curve.nr:6:13::hash_to_field(msg) (2,318 gates, 7.16%)</title><rect x="80.1223%" y="205" width="7.1603%" height="23" fill="rgb(255,209,209)" fg:x="25938" fg:w="2318"/><text x="80.3723%" y="219.50">hash_to_cu..</text></g><g><title>hash_to_field.nr:6:15::poseidon2_hash([m, 1]) (771 gates, 2.38%)</title><rect x="84.9010%" y="181" width="2.3816%" height="23" fill="rgb(255,226,226)" fg:x="27485" fg:w="771"/><text x="85.1510%" y="195.50">ha..</text></g><g><title>utils.nr:17:5::std::hash::poseidon2::Poseidon2::hash(inputs, N) (771 gates, 2.38%)</title><rect x="84.9010%" y="157" width="2.3816%" height="23" fill="rgb(255,226,226)" fg:x="27485" fg:w="771"/><text x="85.1510%" y="171.50">ut..</text></g><g><title>poseidon2.nr:17:13::Poseidon2::hash_internal(input, N, false) (771 gates, 2.38%)</title><rect x="84.9010%" y="133" width="2.3816%" height="23" fill="rgb(255,226,226)" fg:x="27485" fg:w="771"/><text x="85.1510%" y="147.50">po..</text></g><g><title>poseidon2.nr:114:9::sponge.squeeze() (771 gates, 2.38%)</title><rect x="84.9010%" y="109" width="2.3816%" height="23" fill="rgb(255,226,226)" fg:x="27485" fg:w="771"/><text x="85.1510%" y="123.50">po..</text></g><g><title>poseidon2.nr:79:39::self.perform_duplex() (771 gates, 2.38%)</title><rect x="84.9010%" y="85" width="2.3816%" height="23" fill="rgb(255,226,226)" fg:x="27485" fg:w="771"/><text x="85.1510%" y="99.50">po..</text></g><g><title>poseidon2.nr:40:22::crate::hash::poseidon2_permutation(self.state, 4) (771 gates, 2.38%)</title><rect x="84.9010%" y="61" width="2.3816%" height="23" fill="rgb(255,226,226)" fg:x="27485" fg:w="771"/><text x="85.1510%" y="75.50">po..</text></g><g><title>opcode::blackbox::poseidon2_permutation (770 gates, 2.38%)</title><rect x="84.9041%" y="37" width="2.3785%" height="23" fill="rgb(255,226,226)" fg:x="27486" fg:w="770"/><text x="85.1541%" y="51.50">op..</text></g><g><title>map_to_curve.nr:53:12::t != 0 (30 gates, 0.09%)</title><rect x="87.2826%" y="181" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="28256" fg:w="30"/><text x="87.5326%" y="195.50"></text></g><g><title>opcode::arithmetic (30 gates, 0.09%)</title><rect x="87.2826%" y="157" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="28256" fg:w="30"/><text x="87.5326%" y="171.50"></text></g><g><title>map_to_curve.nr:59:13::zeta - (SQRT_NEG_3 * t_2) / d (40 gates, 0.12%)</title><rect x="87.3753%" y="181" width="0.1236%" height="23" fill="rgb(255,244,244)" fg:x="28286" fg:w="40"/><text x="87.6253%" y="195.50"></text></g><g><title>opcode::arithmetic (40 gates, 0.12%)</title><rect x="87.3753%" y="157" width="0.1236%" height="23" fill="rgb(255,244,244)" fg:x="28286" fg:w="40"/><text x="87.6253%" y="171.50"></text></g><g><title>map_to_curve.nr:59:20::(SQRT_NEG_3 * t_2) / d (30 gates, 0.09%)</title><rect x="87.4988%" y="181" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="28326" fg:w="30"/><text x="87.7488%" y="195.50"></text></g><g><title>opcode::arithmetic (30 gates, 0.09%)</title><rect x="87.4988%" y="157" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="28326" fg:w="30"/><text x="87.7488%" y="171.50"></text></g><g><title>map_to_curve.nr:60:13::d / (SQRT_NEG_3 * t) (10 gates, 0.03%)</title><rect x="87.5915%" y="181" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28356" fg:w="10"/><text x="87.8415%" y="195.50"></text></g><g><title>opcode::arithmetic (10 gates, 0.03%)</title><rect x="87.5915%" y="157" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28356" fg:w="10"/><text x="87.8415%" y="171.50"></text></g><g><title>map_to_curve.nr:63:14::x1*x1*x1 (10 gates, 0.03%)</title><rect x="87.6224%" y="181" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28366" fg:w="10"/><text x="87.8724%" y="195.50"></text></g><g><title>opcode::arithmetic (10 gates, 0.03%)</title><rect x="87.6224%" y="157" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28366" fg:w="10"/><text x="87.8724%" y="171.50"></text></g><g><title>map_to_curve.nr:63:14::x1*x1 (10 gates, 0.03%)</title><rect x="87.6533%" y="181" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28376" fg:w="10"/><text x="87.9033%" y="195.50"></text></g><g><title>opcode::arithmetic (10 gates, 0.03%)</title><rect x="87.6533%" y="157" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28376" fg:w="10"/><text x="87.9033%" y="171.50"></text></g><g><title>map_to_curve.nr:64:14::-1 - v (20 gates, 0.06%)</title><rect x="87.6842%" y="181" width="0.0618%" height="23" fill="rgb(255,246,246)" fg:x="28386" fg:w="20"/><text x="87.9342%" y="195.50"></text></g><g><title>opcode::arithmetic (20 gates, 0.06%)</title><rect x="87.6842%" y="157" width="0.0618%" height="23" fill="rgb(255,246,246)" fg:x="28386" fg:w="20"/><text x="87.9342%" y="171.50"></text></g><g><title>map_to_curve.nr:65:14::x2*x2*x2 (20 gates, 0.06%)</title><rect x="87.7460%" y="181" width="0.0618%" height="23" fill="rgb(255,246,246)" fg:x="28406" fg:w="20"/><text x="87.9960%" y="195.50"></text></g><g><title>opcode::arithmetic (20 gates, 0.06%)</title><rect x="87.7460%" y="157" width="0.0618%" height="23" fill="rgb(255,246,246)" fg:x="28406" fg:w="20"/><text x="87.9960%" y="171.50"></text></g><g><title>map_to_curve.nr:66:18::y*y (10 gates, 0.03%)</title><rect x="87.8077%" y="181" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28426" fg:w="10"/><text x="88.0577%" y="195.50"></text></g><g><title>opcode::arithmetic (10 gates, 0.03%)</title><rect x="87.8077%" y="157" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28426" fg:w="10"/><text x="88.0577%" y="171.50"></text></g><g><title>map_to_curve.nr:67:14::x3*x3*x3 (10 gates, 0.03%)</title><rect x="87.8386%" y="181" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28436" fg:w="10"/><text x="88.0886%" y="195.50"></text></g><g><title>opcode::arithmetic (10 gates, 0.03%)</title><rect x="87.8386%" y="157" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28436" fg:w="10"/><text x="88.0886%" y="171.50"></text></g><g><title>map_to_curve.nr:67:14::x3*x3 (10 gates, 0.03%)</title><rect x="87.8695%" y="181" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28446" fg:w="10"/><text x="88.1195%" y="195.50"></text></g><g><title>opcode::arithmetic (10 gates, 0.03%)</title><rect x="87.8695%" y="157" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28446" fg:w="10"/><text x="88.1195%" y="171.50"></text></g><g><title>map_to_curve.nr:24:31::__sqrt(x) (10 gates, 0.03%)</title><rect x="87.9004%" y="157" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28456" fg:w="10"/><text x="88.1504%" y="171.50"></text></g><g><title>opcode::blackbox::range (10 gates, 0.03%)</title><rect x="87.9004%" y="133" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28456" fg:w="10"/><text x="88.1504%" y="147.50"></text></g><g><title>map_to_curve.nr:28:16::sqrt * sqrt == x (50 gates, 0.15%)</title><rect x="87.9313%" y="157" width="0.1544%" height="23" fill="rgb(255,244,244)" fg:x="28466" fg:w="50"/><text x="88.1813%" y="171.50"></text></g><g><title>opcode::arithmetic (50 gates, 0.15%)</title><rect x="87.9313%" y="133" width="0.1544%" height="23" fill="rgb(255,244,244)" fg:x="28466" fg:w="50"/><text x="88.1813%" y="147.50"></text></g><g><title>map_to_curve.nr:69:26::sqrt(s1) (110 gates, 0.34%)</title><rect x="87.9004%" y="181" width="0.3398%" height="23" fill="rgb(255,241,241)" fg:x="28456" fg:w="110"/><text x="88.1504%" y="195.50"></text></g><g><title>map_to_curve.nr:34:16::not_sqrt * not_sqrt == demo_not_square (50 gates, 0.15%)</title><rect x="88.0858%" y="157" width="0.1544%" height="23" fill="rgb(255,244,244)" fg:x="28516" fg:w="50"/><text x="88.3358%" y="171.50"></text></g><g><title>opcode::arithmetic (50 gates, 0.15%)</title><rect x="88.0858%" y="133" width="0.1544%" height="23" fill="rgb(255,244,244)" fg:x="28516" fg:w="50"/><text x="88.3358%" y="147.50"></text></g><g><title>map_to_curve.nr:24:31::__sqrt(x) (10 gates, 0.03%)</title><rect x="88.2402%" y="157" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28566" fg:w="10"/><text x="88.4902%" y="171.50"></text></g><g><title>opcode::blackbox::range (10 gates, 0.03%)</title><rect x="88.2402%" y="133" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28566" fg:w="10"/><text x="88.4902%" y="147.50"></text></g><g><title>map_to_curve.nr:28:16::sqrt * sqrt == x (50 gates, 0.15%)</title><rect x="88.2711%" y="157" width="0.1544%" height="23" fill="rgb(255,244,244)" fg:x="28576" fg:w="50"/><text x="88.5211%" y="171.50"></text></g><g><title>opcode::arithmetic (50 gates, 0.15%)</title><rect x="88.2711%" y="133" width="0.1544%" height="23" fill="rgb(255,244,244)" fg:x="28576" fg:w="50"/><text x="88.5211%" y="147.50"></text></g><g><title>map_to_curve.nr:70:26::sqrt(s2) (90 gates, 0.28%)</title><rect x="88.2402%" y="181" width="0.2780%" height="23" fill="rgb(255,242,242)" fg:x="28566" fg:w="90"/><text x="88.4902%" y="195.50"></text></g><g><title>map_to_curve.nr:34:16::not_sqrt * not_sqrt == demo_not_square (30 gates, 0.09%)</title><rect x="88.4255%" y="157" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="28626" fg:w="30"/><text x="88.6755%" y="171.50"></text></g><g><title>opcode::arithmetic (30 gates, 0.09%)</title><rect x="88.4255%" y="133" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="28626" fg:w="30"/><text x="88.6755%" y="147.50"></text></g><g><title>map_to_curve.nr:24:31::__sqrt(x) (10 gates, 0.03%)</title><rect x="88.5182%" y="157" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28656" fg:w="10"/><text x="88.7682%" y="171.50"></text></g><g><title>opcode::blackbox::range (10 gates, 0.03%)</title><rect x="88.5182%" y="133" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28656" fg:w="10"/><text x="88.7682%" y="147.50"></text></g><g><title>map_to_curve.nr:28:16::sqrt * sqrt == x (50 gates, 0.15%)</title><rect x="88.5491%" y="157" width="0.1544%" height="23" fill="rgb(255,244,244)" fg:x="28666" fg:w="50"/><text x="88.7991%" y="171.50"></text></g><g><title>opcode::arithmetic (50 gates, 0.15%)</title><rect x="88.5491%" y="133" width="0.1544%" height="23" fill="rgb(255,244,244)" fg:x="28666" fg:w="50"/><text x="88.7991%" y="147.50"></text></g><g><title>hash_to_curve.nr:8:14::map_to_curve(u.0) (470 gates, 1.45%)</title><rect x="87.2826%" y="205" width="1.4518%" height="23" fill="rgb(255,232,232)" fg:x="28256" fg:w="470"/><text x="87.5326%" y="219.50"></text></g><g><title>map_to_curve.nr:71:26::sqrt(s3) (70 gates, 0.22%)</title><rect x="88.5182%" y="181" width="0.2162%" height="23" fill="rgb(255,243,243)" fg:x="28656" fg:w="70"/><text x="88.7682%" y="195.50"></text></g><g><title>map_to_curve.nr:34:16::not_sqrt * not_sqrt == demo_not_square (10 gates, 0.03%)</title><rect x="88.7035%" y="157" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28716" fg:w="10"/><text x="88.9535%" y="171.50"></text></g><g><title>opcode::arithmetic (10 gates, 0.03%)</title><rect x="88.7035%" y="133" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28716" fg:w="10"/><text x="88.9535%" y="147.50"></text></g><g><title>map_to_curve.nr:53:12::t != 0 (30 gates, 0.09%)</title><rect x="88.7344%" y="181" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="28726" fg:w="30"/><text x="88.9844%" y="195.50"></text></g><g><title>opcode::arithmetic (30 gates, 0.09%)</title><rect x="88.7344%" y="157" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="28726" fg:w="30"/><text x="88.9844%" y="171.50"></text></g><g><title>map_to_curve.nr:59:13::zeta - (SQRT_NEG_3 * t_2) / d (40 gates, 0.12%)</title><rect x="88.8271%" y="181" width="0.1236%" height="23" fill="rgb(255,244,244)" fg:x="28756" fg:w="40"/><text x="89.0771%" y="195.50"></text></g><g><title>opcode::arithmetic (40 gates, 0.12%)</title><rect x="88.8271%" y="157" width="0.1236%" height="23" fill="rgb(255,244,244)" fg:x="28756" fg:w="40"/><text x="89.0771%" y="171.50"></text></g><g><title>map_to_curve.nr:59:20::(SQRT_NEG_3 * t_2) / d (30 gates, 0.09%)</title><rect x="88.9507%" y="181" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="28796" fg:w="30"/><text x="89.2007%" y="195.50"></text></g><g><title>opcode::arithmetic (30 gates, 0.09%)</title><rect x="88.9507%" y="157" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="28796" fg:w="30"/><text x="89.2007%" y="171.50"></text></g><g><title>map_to_curve.nr:60:13::d / (SQRT_NEG_3 * t) (10 gates, 0.03%)</title><rect x="89.0433%" y="181" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28826" fg:w="10"/><text x="89.2933%" y="195.50"></text></g><g><title>opcode::arithmetic (10 gates, 0.03%)</title><rect x="89.0433%" y="157" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28826" fg:w="10"/><text x="89.2933%" y="171.50"></text></g><g><title>map_to_curve.nr:63:14::x1*x1*x1 (10 gates, 0.03%)</title><rect x="89.0742%" y="181" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28836" fg:w="10"/><text x="89.3242%" y="195.50"></text></g><g><title>opcode::arithmetic (10 gates, 0.03%)</title><rect x="89.0742%" y="157" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28836" fg:w="10"/><text x="89.3242%" y="171.50"></text></g><g><title>map_to_curve.nr:63:14::x1*x1 (10 gates, 0.03%)</title><rect x="89.1051%" y="181" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28846" fg:w="10"/><text x="89.3551%" y="195.50"></text></g><g><title>opcode::arithmetic (10 gates, 0.03%)</title><rect x="89.1051%" y="157" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28846" fg:w="10"/><text x="89.3551%" y="171.50"></text></g><g><title>map_to_curve.nr:64:14::-1 - v (20 gates, 0.06%)</title><rect x="89.1360%" y="181" width="0.0618%" height="23" fill="rgb(255,246,246)" fg:x="28856" fg:w="20"/><text x="89.3860%" y="195.50"></text></g><g><title>opcode::arithmetic (20 gates, 0.06%)</title><rect x="89.1360%" y="157" width="0.0618%" height="23" fill="rgb(255,246,246)" fg:x="28856" fg:w="20"/><text x="89.3860%" y="171.50"></text></g><g><title>map_to_curve.nr:65:14::x2*x2*x2 (20 gates, 0.06%)</title><rect x="89.1978%" y="181" width="0.0618%" height="23" fill="rgb(255,246,246)" fg:x="28876" fg:w="20"/><text x="89.4478%" y="195.50"></text></g><g><title>opcode::arithmetic (20 gates, 0.06%)</title><rect x="89.1978%" y="157" width="0.0618%" height="23" fill="rgb(255,246,246)" fg:x="28876" fg:w="20"/><text x="89.4478%" y="171.50"></text></g><g><title>map_to_curve.nr:66:18::y*y (10 gates, 0.03%)</title><rect x="89.2596%" y="181" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28896" fg:w="10"/><text x="89.5096%" y="195.50"></text></g><g><title>opcode::arithmetic (10 gates, 0.03%)</title><rect x="89.2596%" y="157" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28896" fg:w="10"/><text x="89.5096%" y="171.50"></text></g><g><title>map_to_curve.nr:67:14::x3*x3*x3 (10 gates, 0.03%)</title><rect x="89.2905%" y="181" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28906" fg:w="10"/><text x="89.5405%" y="195.50"></text></g><g><title>opcode::arithmetic (10 gates, 0.03%)</title><rect x="89.2905%" y="157" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28906" fg:w="10"/><text x="89.5405%" y="171.50"></text></g><g><title>map_to_curve.nr:67:14::x3*x3 (10 gates, 0.03%)</title><rect x="89.3213%" y="181" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28916" fg:w="10"/><text x="89.5713%" y="195.50"></text></g><g><title>opcode::arithmetic (10 gates, 0.03%)</title><rect x="89.3213%" y="157" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28916" fg:w="10"/><text x="89.5713%" y="171.50"></text></g><g><title>map_to_curve.nr:24:31::__sqrt(x) (10 gates, 0.03%)</title><rect x="89.3522%" y="157" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28926" fg:w="10"/><text x="89.6022%" y="171.50"></text></g><g><title>opcode::blackbox::range (10 gates, 0.03%)</title><rect x="89.3522%" y="133" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="28926" fg:w="10"/><text x="89.6022%" y="147.50"></text></g><g><title>map_to_curve.nr:28:16::sqrt * sqrt == x (50 gates, 0.15%)</title><rect x="89.3831%" y="157" width="0.1544%" height="23" fill="rgb(255,244,244)" fg:x="28936" fg:w="50"/><text x="89.6331%" y="171.50"></text></g><g><title>opcode::arithmetic (50 gates, 0.15%)</title><rect x="89.3831%" y="133" width="0.1544%" height="23" fill="rgb(255,244,244)" fg:x="28936" fg:w="50"/><text x="89.6331%" y="147.50"></text></g><g><title>map_to_curve.nr:69:26::sqrt(s1) (110 gates, 0.34%)</title><rect x="89.3522%" y="181" width="0.3398%" height="23" fill="rgb(255,241,241)" fg:x="28926" fg:w="110"/><text x="89.6022%" y="195.50"></text></g><g><title>map_to_curve.nr:34:16::not_sqrt * not_sqrt == demo_not_square (50 gates, 0.15%)</title><rect x="89.5376%" y="157" width="0.1544%" height="23" fill="rgb(255,244,244)" fg:x="28986" fg:w="50"/><text x="89.7876%" y="171.50"></text></g><g><title>opcode::arithmetic (50 gates, 0.15%)</title><rect x="89.5376%" y="133" width="0.1544%" height="23" fill="rgb(255,244,244)" fg:x="28986" fg:w="50"/><text x="89.7876%" y="147.50"></text></g><g><title>map_to_curve.nr:24:31::__sqrt(x) (10 gates, 0.03%)</title><rect x="89.6920%" y="157" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="29036" fg:w="10"/><text x="89.9420%" y="171.50"></text></g><g><title>opcode::blackbox::range (10 gates, 0.03%)</title><rect x="89.6920%" y="133" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="29036" fg:w="10"/><text x="89.9420%" y="147.50"></text></g><g><title>map_to_curve.nr:28:16::sqrt * sqrt == x (50 gates, 0.15%)</title><rect x="89.7229%" y="157" width="0.1544%" height="23" fill="rgb(255,244,244)" fg:x="29046" fg:w="50"/><text x="89.9729%" y="171.50"></text></g><g><title>opcode::arithmetic (50 gates, 0.15%)</title><rect x="89.7229%" y="133" width="0.1544%" height="23" fill="rgb(255,244,244)" fg:x="29046" fg:w="50"/><text x="89.9729%" y="147.50"></text></g><g><title>map_to_curve.nr:70:26::sqrt(s2) (90 gates, 0.28%)</title><rect x="89.6920%" y="181" width="0.2780%" height="23" fill="rgb(255,242,242)" fg:x="29036" fg:w="90"/><text x="89.9420%" y="195.50"></text></g><g><title>map_to_curve.nr:34:16::not_sqrt * not_sqrt == demo_not_square (30 gates, 0.09%)</title><rect x="89.8774%" y="157" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="29096" fg:w="30"/><text x="90.1274%" y="171.50"></text></g><g><title>opcode::arithmetic (30 gates, 0.09%)</title><rect x="89.8774%" y="133" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="29096" fg:w="30"/><text x="90.1274%" y="147.50"></text></g><g><title>map_to_curve.nr:24:31::__sqrt(x) (10 gates, 0.03%)</title><rect x="89.9700%" y="157" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="29126" fg:w="10"/><text x="90.2200%" y="171.50"></text></g><g><title>opcode::blackbox::range (10 gates, 0.03%)</title><rect x="89.9700%" y="133" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="29126" fg:w="10"/><text x="90.2200%" y="147.50"></text></g><g><title>map_to_curve.nr:28:16::sqrt * sqrt == x (50 gates, 0.15%)</title><rect x="90.0009%" y="157" width="0.1544%" height="23" fill="rgb(255,244,244)" fg:x="29136" fg:w="50"/><text x="90.2509%" y="171.50"></text></g><g><title>opcode::arithmetic (50 gates, 0.15%)</title><rect x="90.0009%" y="133" width="0.1544%" height="23" fill="rgb(255,244,244)" fg:x="29136" fg:w="50"/><text x="90.2509%" y="147.50"></text></g><g><title>lib.nr:98:13::compute_H::&lt;N, N_PLUS_2&gt;(msg, Pk) (3,818 gates, 11.79%)</title><rect x="78.3925%" y="253" width="11.7938%" height="23" fill="rgb(255,198,198)" fg:x="25378" fg:w="3818"/><text x="78.6425%" y="267.50">lib.nr:98:13::com..</text></g><g><title>lib.nr:60:5::hash_to_curve(input) (3,818 gates, 11.79%)</title><rect x="78.3925%" y="229" width="11.7938%" height="23" fill="rgb(255,198,198)" fg:x="25378" fg:w="3818"/><text x="78.6425%" y="243.50">lib.nr:60:5::hash..</text></g><g><title>hash_to_curve.nr:9:14::map_to_curve(u.1) (470 gates, 1.45%)</title><rect x="88.7344%" y="205" width="1.4518%" height="23" fill="rgb(255,232,232)" fg:x="28726" fg:w="470"/><text x="88.9844%" y="219.50"></text></g><g><title>map_to_curve.nr:71:26::sqrt(s3) (70 gates, 0.22%)</title><rect x="89.9700%" y="181" width="0.2162%" height="23" fill="rgb(255,243,243)" fg:x="29126" fg:w="70"/><text x="90.2200%" y="195.50"></text></g><g><title>map_to_curve.nr:34:16::not_sqrt * not_sqrt == demo_not_square (10 gates, 0.03%)</title><rect x="90.1554%" y="157" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="29186" fg:w="10"/><text x="90.4054%" y="171.50"></text></g><g><title>opcode::arithmetic (10 gates, 0.03%)</title><rect x="90.1554%" y="133" width="0.0309%" height="23" fill="rgb(255,247,247)" fg:x="29186" fg:w="10"/><text x="90.4054%" y="147.50"></text></g><g><title>opcode::arithmetic (62 gates, 0.19%)</title><rect x="90.1863%" y="85" width="0.1915%" height="23" fill="rgb(255,243,243)" fg:x="29196" fg:w="62"/><text x="90.4363%" y="99.50"></text></g><g><title>poseidon2.nr:104:17::sponge.absorb(input[i]) (2,372 gates, 7.33%)</title><rect x="90.1863%" y="157" width="7.3271%" height="23" fill="rgb(255,209,209)" fg:x="29196" fg:w="2372"/><text x="90.4363%" y="171.50">poseidon2...</text></g><g><title>poseidon2.nr:52:21::self.perform_duplex() (2,372 gates, 7.33%)</title><rect x="90.1863%" y="133" width="7.3271%" height="23" fill="rgb(255,209,209)" fg:x="29196" fg:w="2372"/><text x="90.4363%" y="147.50">poseidon2...</text></g><g><title>poseidon2.nr:40:22::crate::hash::poseidon2_permutation(self.state, 4) (2,372 gates, 7.33%)</title><rect x="90.1863%" y="109" width="7.3271%" height="23" fill="rgb(255,209,209)" fg:x="29196" fg:w="2372"/><text x="90.4363%" y="123.50">poseidon2...</text></g><g><title>opcode::blackbox::poseidon2_permutation (2,310 gates, 7.14%)</title><rect x="90.3778%" y="85" width="7.1356%" height="23" fill="rgb(255,209,209)" fg:x="29258" fg:w="2310"/><text x="90.6278%" y="99.50">opcode::bl..</text></g><g><title>opcode::arithmetic (30 gates, 0.09%)</title><rect x="97.5134%" y="85" width="0.0927%" height="23" fill="rgb(255,245,245)" fg:x="31568" fg:w="30"/><text x="97.7634%" y="99.50"></text></g><g><title>main.nr:10:9::verify_plume_proof::&lt;1,1+2&gt;(msg, Pk, nullifier, A2, B2, s) (32,368 gates, 99.98%)</title><rect x="0.0000%" y="277" width="99.9846%" height="23" fill="rgb(255,100,100)" fg:x="0" fg:w="32368"/><text x="0.2500%" y="291.50">main.nr:10:9::verify_plume_proof::&lt;1,1+2&gt;(msg, Pk, nullifier, A2, B2, s)</text></g><g><title>lib.nr:99:22::poseidon2_points::&lt;6, 2*6&gt;([G, H, A, B, A2, B2]) (3,172 gates, 9.80%)</title><rect x="90.1863%" y="253" width="9.7983%" height="23" fill="rgb(255,203,203)" fg:x="29196" fg:w="3172"/><text x="90.4363%" y="267.50">lib.nr:99:22::..</text></g><g><title>lib.nr:157:5::poseidon2_hash(input) (3,172 gates, 9.80%)</title><rect x="90.1863%" y="229" width="9.7983%" height="23" fill="rgb(255,203,203)" fg:x="29196" fg:w="3172"/><text x="90.4363%" y="243.50">lib.nr:157:5::..</text></g><g><title>utils.nr:17:5::std::hash::poseidon2::Poseidon2::hash(inputs, N) (3,172 gates, 9.80%)</title><rect x="90.1863%" y="205" width="9.7983%" height="23" fill="rgb(255,203,203)" fg:x="29196" fg:w="3172"/><text x="90.4363%" y="219.50">utils.nr:17:5:..</text></g><g><title>poseidon2.nr:17:13::Poseidon2::hash_internal(input, N, false) (3,172 gates, 9.80%)</title><rect x="90.1863%" y="181" width="9.7983%" height="23" fill="rgb(255,203,203)" fg:x="29196" fg:w="3172"/><text x="90.4363%" y="195.50">poseidon2.nr:1..</text></g><g><title>poseidon2.nr:114:9::sponge.squeeze() (800 gates, 2.47%)</title><rect x="97.5134%" y="157" width="2.4712%" height="23" fill="rgb(255,226,226)" fg:x="31568" fg:w="800"/><text x="97.7634%" y="171.50">po..</text></g><g><title>poseidon2.nr:79:39::self.perform_duplex() (800 gates, 2.47%)</title><rect x="97.5134%" y="133" width="2.4712%" height="23" fill="rgb(255,226,226)" fg:x="31568" fg:w="800"/><text x="97.7634%" y="147.50">po..</text></g><g><title>poseidon2.nr:40:22::crate::hash::poseidon2_permutation(self.state, 4) (800 gates, 2.47%)</title><rect x="97.5134%" y="109" width="2.4712%" height="23" fill="rgb(255,226,226)" fg:x="31568" fg:w="800"/><text x="97.7634%" y="123.50">po..</text></g><g><title>opcode::blackbox::poseidon2_permutation (770 gates, 2.38%)</title><rect x="97.6060%" y="85" width="2.3785%" height="23" fill="rgb(255,226,226)" fg:x="31598" fg:w="770"/><text x="97.8560%" y="99.50">op..</text></g><g><title>all (32,373 gates, 100%)</title><rect x="0.0000%" y="301" width="100.0000%" height="23" fill="rgb(255,100,100)" fg:x="0" fg:w="32373"/><text x="0.2500%" y="315.50"></text></g><g><title>unknown (5 gates, 0.02%)</title><rect x="99.9846%" y="277" width="0.0154%" height="23" fill="rgb(255,248,248)" fg:x="32368" fg:w="5"/><text x="100.2346%" y="291.50"></text></g></svg></svg>

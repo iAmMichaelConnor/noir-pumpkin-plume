@@ -1,5 +1,7 @@
 # PLUME Benchmark
 
+TODO: this isn't for the Grumpkin/Poseidon2 version.
+
 > Computational statistics.
 
 ## Environment
