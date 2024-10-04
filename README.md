@@ -1,8 +1,14 @@
 # Plume in Noir
 
+Poseidon2 + Grumpkin = Pumpkin :jack_o_lantern:
+
 Plume using the Grumpkin curve, Poseidon2 hash, and a map-to-curve approach specifically for BN curves.
 
-These choices of curve and hash seek to minimise constraint counts in circuits. Currently it's ~3300 constraints to verify a plume nullifier with this approach.
+These choices of curve and hash seek to minimise constraint counts in circuits. The last I measured, it's ~3300 constraints to verify a plume nullifier with this approach.
+
+## Warning
+
+This approach has been written quickly, with no review. It will have bugs. The approach might not even be sound. Don't use it.
 
 ## About the repo
 
