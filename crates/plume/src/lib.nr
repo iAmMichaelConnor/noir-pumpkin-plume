@@ -74,7 +74,11 @@ unconstrained pub fn compute_nullifier(sk: Scalar, H: Point) -> Point {
 
 // For testing, not for production use, because it requires sk!!!
 // `msg` for Aztec purposes will be a note hash.
-unconstrained pub fn compute_plume_proof<let N: u32, let N_PLUS_2: u32>(sk_f: Field, msg: [Field; N], r_n: ScalarWithOps) -> (Point, Point, Point, Point, Scalar) {
+unconstrained pub fn compute_plume_proof<let N: u32, let N_PLUS_2: u32>(
+    sk_f: Field,
+    msg: [Field; N],
+    r_n: ScalarWithOps
+) -> (Point, Point, Point, Point, Scalar) {
     let sk: Scalar = Scalar::from_field(sk_f);
     let sk_n: ScalarWithOps = field_to_bignum_unsafe(sk_f);
     let r: Scalar = bignum_to_scalar(r_n);
@@ -104,7 +108,7 @@ pub fn verify_plume_proof<let N: u32, let N_PLUS_2: u32>(msg: [Field; N], A: Poi
     let Pk = A;
     let H = compute_H::<N, N_PLUS_2>(msg, Pk);
     let c_f: Field = poseidon2_points::<6, 2*6>([G, H, A, B, A2, B2]);
-   
+
     let c: Scalar = Scalar::from_field(c_f);
 
     // Negating the point is more efficient than negating the non-native scalar c:

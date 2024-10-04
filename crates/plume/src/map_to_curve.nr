@@ -55,18 +55,18 @@ pub(crate) fn map_to_curve(t: Field) -> Point {
     assert(t != 0, "0 not yet supported");
 
     let t_2 = t * t;
-    
+
     let zeta = (-1 + SQRT_NEG_3) / 2;
     let d = (1 + b + t_2);
     let v = zeta - (SQRT_NEG_3 * t_2) / d;
     let y = d / (SQRT_NEG_3 * t);
 
     let x1 = v;
-    let s1 = x1*x1*x1 + b;
+    let s1 = x1 * x1 * x1 + b;
     let x2 = -1 - v;
-    let s2 = x2*x2*x2 + b;
-    let x3 = 1 + y*y;
-    let s3 = x3*x3*x3 + b;
+    let s2 = x2 * x2 * x2 + b;
+    let x3 = 1 + y * y;
+    let s3 = x3 * x3 * x3 + b;
 
     let (is_sq_y1, y1) = sqrt(s1);
     let (is_sq_y2, y2) = sqrt(s2);

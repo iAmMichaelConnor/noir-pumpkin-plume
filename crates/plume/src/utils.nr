@@ -149,14 +149,16 @@ unconstrained fn __get_x1_split_hint(x: F) -> (u8, Field) {
     let mut x1_byte_shifted_right: Field = x1_bytes_shifted_right[13] as Field;
     for i in 0..13 {
         let j = 13 - 1 - i;
-        x1_byte_shifted_right = x1_byte_shifted_right * 256 + x1_bytes_shifted_right[j] as Field;  
+        x1_byte_shifted_right = x1_byte_shifted_right * 256 + x1_bytes_shifted_right[j] as Field;
     }
     (x1_le_byte_0, x1_byte_shifted_right)
 }
 
 pub(crate) fn bignum_to_scalar(x: F) -> Scalar {
     // We assume the bignum limbs have already been checked to be < 120 bits.
-    let (x1_le_byte_0, x1_byte_shifted_right) = unsafe { __get_x1_split_hint(x) };
+    let (x1_le_byte_0, x1_byte_shifted_right) = unsafe {
+        __get_x1_split_hint(x)
+    };
 
     let x1_le_byte_0_as_field = x1_le_byte_0 as Field;
 
